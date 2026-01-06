@@ -1,0 +1,14 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "Chama-chatbot"
+resolve_s3 = true
+s3_prefix = "Chama-chatbot"
+profile = "chama"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "ProjectName=\"pula-chat\" RDSHost=\"prod-postgres-db.c3ik622s2eej.eu-west-1.rds.amazonaws.com\""
+image_repositories = []
+
+[default.global.parameters]
+region = "eu-west-1"

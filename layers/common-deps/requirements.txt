@@ -1,0 +1,6 @@
+six
+requests
+boto3
+psycopg2-binary
+strands-agents
+strands-agents-tools

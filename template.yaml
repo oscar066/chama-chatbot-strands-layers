@@ -1,0 +1,223 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SAM template for deploying a Chatbot with a Public RDS pgvector and an API Gateway endpoint.
+  Replaces Lex with direct API Gateway integration using Strands.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "pula-pitch"
+    Description: A prefix for all created resources to ensure uniqueness.
+  RDSHost:
+    Type: String
+    Default: "prod-postgres-db.c3ik622s2eej.eu-west-1.rds.amazonaws.com"
+  RDSPassword:
+    Type: String
+    NoEcho: true
+    Default: "^bdnWKXhljqLl37B"
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 120
+    MemorySize: 512
+    Architectures: [x86_64]
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+
+Resources:
+  # ------------------------------------------------------------------
+  # 1. LAYERS
+  # ------------------------------------------------------------------
+  CommonDepsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${ProjectName}-common-deps"
+      Description: Lightweight dependencies (psycopg2, strands, requests)
+      ContentUri: layers/common-deps/
+      CompatibleRuntimes: [python3.11]
+    Metadata:
+      BuildMethod: python3.11
+
+  DocDepsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${ProjectName}-doc-deps"
+      Description: Heavy dependencies for PDF/Excel processing (pandas, numpy)
+      ContentUri: layers/doc-deps/
+      CompatibleRuntimes: [python3.11]
+    Metadata:
+      BuildMethod: python3.11
+      
+  SharedLogicLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${ProjectName}-shared-logic"
+      Description: Shared business logic and tools
+      ContentUri: layers/shared-logic/
+      CompatibleRuntimes: [python3.11]
+    Metadata:
+      BuildMethod: python3.11
+
+  # ------------------------------------------------------------------
+  # 2. STORAGE
+  # ------------------------------------------------------------------
+  KnowledgeBaseBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-knowledge-base-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ConversationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-conversations"
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  # ------------------------------------------------------------------
+  # 3. API GATEWAY (HTTP API)
+  # ------------------------------------------------------------------
+  ChamaHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: Prod
+      CorsConfiguration:
+        AllowMethods:
+          - POST
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+        AllowOrigins:
+          - "*"
+
+  # ------------------------------------------------------------------
+  # 4. IAM ROLES
+  # ------------------------------------------------------------------
+  FulfillmentLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockAccessPolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: '*'
+        - PolicyName: DynamoDBAccessPolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:Query]
+                Resource: !GetAtt ConversationsTable.Arn
+
+  DocumentProcessorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockAccessPolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
+        - PolicyName: S3ReadAccessPolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${ProjectName}-knowledge-base-${AWS::AccountId}/*"
+
+  # ------------------------------------------------------------------
+  # 5. LAMBDA FUNCTIONS
+  # ------------------------------------------------------------------
+  FulfillmentLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/fulfillment_lambda/
+      Handler: app.lambda_handler
+      Role: !GetAtt FulfillmentLambdaRole.Arn
+      Layers:
+        - !Ref CommonDepsLayer
+        - !Ref SharedLogicLayer
+      Environment:
+        Variables:
+          CONVERSATION_TABLE: !Ref ConversationsTable
+          DB_HOST: !Ref RDSHost
+          DB_PASSWORD: !Ref RDSPassword
+          DB_USER: "db_admin"
+          DB_NAME: "postgres"
+      Events:
+        ChatApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ChamaHttpApi
+            Path: /chat
+            Method: POST
+
+  DocumentProcessorLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/document_processor_lambda/
+      Handler: app.lambda_handler
+      Role: !GetAtt DocumentProcessorLambdaRole.Arn
+      Layers:
+        - !Ref CommonDepsLayer
+        - !Ref DocDepsLayer       # Heavy layer used here only
+        - !Ref SharedLogicLayer
+      Timeout: 900
+      MemorySize: 2048
+      Environment:
+        Variables:
+          DB_HOST: !Ref RDSHost
+          DB_PASSWORD: !Ref RDSPassword
+          DB_USER: "db_admin"
+          DB_NAME: "postgres"
+      Events:
+        S3UploadTrigger:
+          Type: S3
+          Properties:
+            Bucket: !Ref KnowledgeBaseBucket
+            Events: s3:ObjectCreated:*
+
+Outputs:
+  ApiEndpoint:
+    Description: "The invoke URL for the chatbot API."
+    Value: !Sub "https://${ChamaHttpApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/chat"
+  
+  KnowledgeBaseBucketName:
+    Description: "Name of the S3 bucket for uploading FAQ documents."
+    Value: !Ref KnowledgeBaseBucket

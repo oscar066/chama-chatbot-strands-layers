@@ -1,0 +1,2 @@
+# Dependencies removed correctly as they are provided by the Lambda Layer.
+# This file is kept empty to avoid packaging duplicates.
