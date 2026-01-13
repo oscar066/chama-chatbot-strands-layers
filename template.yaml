@@ -11,11 +11,11 @@ Parameters:
     Description: A prefix for all created resources to ensure uniqueness.
   RDSHost:
     Type: String
-    Default: "prod-postgres-db.c3ik622s2eej.eu-west-1.rds.amazonaws.com"
+    Default: "parawise-prod.c3ik622s2eej.eu-west-1.rds.amazonaws.com"
   RDSPassword:
     Type: String
     NoEcho: true
-    Default: "^bdnWKXhljqLl37B"
+    Default: "5fQWIh5hgEQcmv8fOASA"
 
 Globals:
   Function:
@@ -91,20 +91,53 @@ Resources:
       BillingMode: PAY_PER_REQUEST
 
   # ------------------------------------------------------------------
-  # 3. API GATEWAY (HTTP API)
+  # 3. API GATEWAY (REST API)
   # ------------------------------------------------------------------
-  ChamaHttpApi:
-    Type: AWS::Serverless::HttpApi
+  ChamaRestApi:
+    Type: AWS::Serverless::Api
     Properties:
       StageName: Prod
-      CorsConfiguration:
-        AllowMethods:
-          - POST
-          - OPTIONS
-        AllowHeaders:
-          - Content-Type
-        AllowOrigins:
-          - "*"
+      Auth:
+        ApiKeyRequired: true  # Enforces x-api-key header globally
+      Cors:
+        AllowMethods: "'POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Api-Key'"
+        AllowOrigin: "'*'"
+  
+  # API Key Resource
+  ChamaApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn: [ ChamaRestApiProdStage ]
+    Properties:
+      Name: !Sub "${ProjectName}-api-key"
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref ChamaRestApi
+          StageName: Prod
+
+  # Usage Plan
+  ChamaUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: [ ChamaRestApiProdStage ]
+    Properties:
+      UsagePlanName: !Sub "${ProjectName}-usage-plan"
+      ApiStages:
+        - ApiId: !Ref ChamaRestApi
+          Stage: Prod
+      Quota:
+        Limit: 1000
+        Period: DAY
+      Throttle:
+        BurstLimit: 10
+        RateLimit: 5
+
+  # Link Key to Plan
+  ChamaUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ChamaApiKey
+      UsagePlanId: !Ref ChamaUsagePlan
+      KeyType: API_KEY
 
   # ------------------------------------------------------------------
   # 4. IAM ROLES
@@ -178,13 +211,13 @@ Resources:
           CONVERSATION_TABLE: !Ref ConversationsTable
           DB_HOST: !Ref RDSHost
           DB_PASSWORD: !Ref RDSPassword
-          DB_USER: "db_admin"
-          DB_NAME: "postgres"
+          DB_USER: "dbadmin"
+          DB_NAME: "parawise_db"
       Events:
         ChatApi:
-          Type: HttpApi
+          Type: Api # Changed from HttpApi to Api (REST)
           Properties:
-            ApiId: !Ref ChamaHttpApi
+            RestApiId: !Ref ChamaRestApi
             Path: /chat
             Method: POST
 
@@ -204,8 +237,8 @@ Resources:
         Variables:
           DB_HOST: !Ref RDSHost
           DB_PASSWORD: !Ref RDSPassword
-          DB_USER: "db_admin"
-          DB_NAME: "postgres"
+          DB_USER: "dbadmin"
+          DB_NAME: "parawise_db"
       Events:
         S3UploadTrigger:
           Type: S3
@@ -216,7 +249,7 @@ Resources:
 Outputs:
   ApiEndpoint:
     Description: "The invoke URL for the chatbot API."
-    Value: !Sub "https://${ChamaHttpApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/chat"
+    Value: !Sub "https://${ChamaRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/chat"
   
   KnowledgeBaseBucketName:
     Description: "Name of the S3 bucket for uploading FAQ documents."
