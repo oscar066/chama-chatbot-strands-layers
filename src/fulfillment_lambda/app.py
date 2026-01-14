@@ -18,7 +18,7 @@ bedrock_llm = BedrockModel(
 agent = Agent(
     tools=[tools.search_knowledge_base],
     model=bedrock_llm,
-    system_prompt="""You are a helpful Pula Pitch AI assistant. Respond professionally and warmly.
+    system_prompt="""You are a helpful AI assistant. Respond professionally and warmly.
 
     GUIDELINES:
     1. GREETINGS: If the user greets you, respond politely and ask how you can help.
@@ -56,6 +56,10 @@ def lambda_handler(event, context):
         
         # Clean response
         final_response = str(agent_response_raw).strip()
+
+        # Remove reasoning tags if present
+        if '</reasoning>' in final_response:
+            final_response = final_response.split('</reasoning>')[-1].strip()
 
         # Store the FINAL message the user sees
         store_conversation(user_id, final_response, 'bot')
